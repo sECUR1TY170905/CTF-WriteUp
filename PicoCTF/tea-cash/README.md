@@ -1,94 +1,98 @@
-﻿# tea-cash
+﻿![alt text](image.png)
+Đây là mã nguồn:
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <inttypes.h>
 
-## Challenge Info
+#define CHUNK_COUNT 6
+#define CHUNK_SIZE 0x80           
+#define FLAG_FILE "flag.txt"
+#define FLAG_OFFSET (sizeof(void *))  
 
-| Field       | Details                  |
-|-------------|--------------------------|
-| **CTF**     | picoCTF 2026             |
-| **Category**| Binary Exploitation      |
-| **Author**  | Aditya Sudhansu          |
-| **Points**  | 100                      |
-| **Difficulty** | Medium               |
+static int is_known_chunk(void *p, void *chunks[], int n) {
+    for (int i = 0; i < n; ++i) {
+        if (chunks[i] == p) return 1;
+    }
+    return 0;
+}
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    void *chunks[CHUNK_COUNT];
+    char flag_buf[256] = {0};
+    FILE *f = fopen(FLAG_FILE, "r");
+    if (!f) {
+        fprintf(stderr, "Could not open %s\n", FLAG_FILE);
+        return 1;
+    }
+    if (!fgets(flag_buf, sizeof(flag_buf), f)) {
+        fclose(f);
+        fprintf(stderr, "Could not read flag from %s\n", FLAG_FILE);
+        return 1;
+    }
+    fclose(f);
+  
+    size_t flen = strlen(flag_buf);
+    if (flen && flag_buf[flen-1] == '\n') {
+        flag_buf[flen-1] = '\0';
+        flen--;
+    }
+    if (FLAG_OFFSET + flen >= CHUNK_SIZE) {
+        fprintf(stderr, "Flag too large for chunk. Increase CHUNK_SIZE or reduce flag length.\n");
+        return 1;
+    }
+    for (int i = 0; i < CHUNK_COUNT; ++i) {
+        chunks[i] = malloc(CHUNK_SIZE);
+        if (!chunks[i]) {
+            fprintf(stderr, "malloc failed at i=%d\n", i);
+            for (int j = 0; j < i; ++j) free(chunks[j]);
+            return 1;
+        }
+        memset(chunks[i], 0, CHUNK_SIZE);
+    }
+    memcpy((char*)chunks[CHUNK_COUNT-1] + FLAG_OFFSET, flag_buf, flen + 1);
+    void *head = chunks[0]; 
+    printf("tcache head (start of free list) -> %p\n", head);
+for (int i = CHUNK_COUNT - 1; i >= 0; --i) {
+    free(chunks[i]);
+}
 
-## Description
+    void *expected = head;
+    for (int i = 0; i < CHUNK_COUNT; ++i) {
+        void *user_addr = NULL;
+        printf("Chunk %d address: ", i+1);
+        if (scanf("%p", &user_addr) != 1) {
+            fprintf(stderr, "Invalid input. Exiting.\n");
+            return 1;
+        }
 
-> You've stumbled upon a mysterious cash register that doesn't keep money — it keeps secrets in memory. Traverse the free list and find all the free chunks to get to the flag.
+        if (user_addr != expected) {
+            fprintf(stderr, "Wrong address. Got %p. Exiting.\n", user_addr);
+            return 1;
+        }
 
-**Provided files:** `heapedit`, `Makefile.share`, `libc.so.6`, `heapedit.c`
+        void *next = NULL;
+        memcpy(&next, user_addr, sizeof(void *)); 
 
----
+        if (next != NULL && !is_known_chunk(next, chunks, CHUNK_COUNT)) {
+            fprintf(stderr, "Detected invalid next pointer value %p (not one of allocated chunks). Aborting to avoid crash.\n", next);
+            fprintf(stderr, "Dump of first 16 bytes at %p: ", user_addr);
+            unsigned char *b = user_addr;
+            for (size_t z = 0; z < 16; ++z) {
+                fprintf(stderr, "%02x ", b[z]);
+            }
+            fprintf(stderr, "\n");
+            return 1;
+        }
 
-## Solution
+        expected = next;
+    }
+    char *flag_loc = (char*)chunks[CHUNK_COUNT-1] + FLAG_OFFSET;
+    printf("Correct traversal! Flag: %s\n", flag_loc);
 
-### Overview
-
-Đây là một bài **Heap Exploitation** cơ bản, yêu cầu ta duyệt qua **tcache free list** để tìm tất cả các free chunk trong heap. Bài không yêu cầu exploit phức tạp — chỉ cần hiểu cơ chế tcache và điền đúng địa chỉ các chunk theo thứ tự.
-
-### Tcache Free List
-
-Trong glibc, **tcache (thread-local caching)** là một cơ chế quản lý heap để tái sử dụng các chunk nhỏ đã được `free()`. Các chunk trong tcache được tổ chức thành một **singly-linked list** (danh sách liên kết đơn).
-
-Cấu trúc:
-```
-tcache_entry (head) -> chunk1 -> chunk2 -> ... -> NULL
-```
-
-Mỗi free chunk lưu con trỏ `next` trỏ tới chunk tiếp theo ngay tại đầu vùng dữ liệu của nó.
-
-### Analysis
-
-Kết nối đến server và quan sát output:
-
-```
-$ nc candy-mountain.picoctf.net 55825
-tcache head (start of free list) -> 0x22ad9490
-```
-
-Server cho ta biết địa chỉ head của tcache free list. Nhiệm vụ là duyệt qua từng chunk một.
-
-### Exploit
-
-Nhận được địa chỉ đầu của free list từ server:
-
-```
-tcache head (start of free list) -> 0x22ad9490
-```
-
-Duyệt qua lần lượt 6 chunk theo thứ tự địa chỉ tăng dần (mỗi chunk cách nhau `0x90` bytes — kích thước của chunk bao gồm header):
-
-| Chunk | Address       |
-|-------|--------------|
-| 1     | `0x22ad9490` |
-| 2     | `0x22ad9520` |
-| 3     | `0x22ad95b0` |
-| 4     | `0x22ad9640` |
-| 5     | `0x22ad96d0` |
-| 6     | `0x22ad9760` |
-
-Sau khi nhập đúng thứ tự tất cả 6 địa chỉ, server xác nhận traversal thành công và trả về flag.
-
-### Result
-
-```
-$ nc candy-mountain.picoctf.net 55825
-tcache head (start of free list) -> 0x22ad9490
-Chunk 1 address: 0x22ad9490
-Chunk 2 address: 0x22ad9520
-Chunk 3 address: 0x22ad95b0
-Chunk 4 address: 0x22ad9640
-Chunk 5 address: 0x22ad96d0
-Chunk 6 address: 0x22ad9760
-Correct traversal! Flag: picoCTF{0fd522cb3e9905002631d25e21a4750b}
-```
-
-## Flag
-
-```
-picoCTF{0fd522cb3e9905002631d25e21a4750b}
-```
-
-## Key Takeaways
-
-- **tcache** trong glibc lưu trữ các free chunk dưới dạng singly-linked list.
-- Head của free list được cung cấp sẵn → chỉ cần đọc con trỏ `next` của từng chunk để duyệt danh sách.
-- Bài này rèn luyện kỹ năng đọc hiểu cấu trúc heap — nền tảng cho các bài heap exploitation phức tạp hơn như **Use-After-Free**, **tcache poisoning**, v.v.
+    return 0;
+}
+![alt text](image-1.png)
